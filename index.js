@@ -16,6 +16,16 @@ const rl = readline.createInterface({
   output: process.stdout
 });
 
+// --- Hot reload environment variables ---
+function loadEnv() {
+  dotenv.config();
+  return {
+    CARDLADDER_AUTHORIZATION: process.env.CARDLADDER_AUTHORIZATION,
+    CARDLADDER_APP_CHECK: process.env.CARDLADDER_APP_CHECK,
+    PSA_API_TOKEN: process.env.PSA_API_TOKEN
+  };
+}
+
 // --- Create /scans folder automatically ---
 const scansDir = path.join(process.cwd(), 'scans');
 if (!fs.existsSync(scansDir)) {
@@ -37,6 +47,7 @@ rl.question('📄 What would you like to name the CSV file? (leave blank for aut
     header: [
       { id: 'certNumber', title: 'Cert Number' },
       { id: 'estimatedValue', title: 'Estimated Value' },
+      { id: 'payout', title: 'Payout' },
       { id: 'lastSaleDate', title: 'Last Sale Date' },
       { id: 'confidence', title: 'Confidence' },
       { id: 'grader', title: 'Grader' },
@@ -103,7 +114,7 @@ function parseCerts(input) {
 async function processCerts(certs) {
   let processed = 0;
   const total = certs.length;
-  const startTime = Date.now(); // ⏱️ Start timer
+  const startTime = Date.now();
 
   for (const { grader, certNumber } of certs) {
     processed++;
@@ -121,9 +132,12 @@ async function processCerts(certs) {
         continue;
       }
 
+      const payout = cardladderResult.estimatedValue ? (cardladderResult.estimatedValue * 0.90).toFixed(2) : '';
+
       const row = {
         certNumber,
         estimatedValue: cardladderResult.estimatedValue,
+        payout,
         lastSaleDate: cardladderResult.lastSaleDate,
         confidence: cardladderResult.confidence,
         grader,
@@ -138,7 +152,7 @@ async function processCerts(certs) {
       };
 
       await csvWriter.writeRecords([row]);
-      process.stdout.write('\x07'); // 🎵 Beep!
+      process.stdout.write('\x07'); // 🎵
 
       scanCounter++;
       if (scanCounter % 10 === 0) {
@@ -151,7 +165,7 @@ async function processCerts(certs) {
     }
   }
 
-  const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1); // seconds
+  const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`\n🎯 Finished scanning ${total} cert(s) in ${elapsedTime} seconds!\n`);
 }
 
@@ -165,73 +179,76 @@ function buildProgressBar(current, total) {
 
 // --- Fetch Cardladder ---
 async function fetchCardladderResult(certNumber, grader) {
-    try {
-      const searchResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpCertSearch", {
-        method: "POST",
-        headers: {
-          "accept": "*/*",
-          "content-type": "application/json",
-          "authorization": process.env.CARDLADDER_AUTHORIZATION,
-          "x-firebase-appcheck": process.env.CARDLADDER_APP_CHECK
-        },
-        body: JSON.stringify({ data: { cert: certNumber, grader: grader.toLowerCase() } })
-      });
-  
-      if (searchResponse.status === 401) {
-        console.error('\n🚨 Cardladder Authorization expired!');
-        return null;
-      }
-  
-      const searchData = await searchResponse.json();
-      const gemRateId = searchData?.result?.gemRateId;
-      const condition = searchData?.result?.condition || "g10"; // <--- use actual condition!
-  
-      if (!gemRateId) {
-        console.log('\n⚠️ No gemRateId found.');
-        return null;
-      }
-  
-      const estimateResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpEstimateValue", {
-        method: "POST",
-        headers: {
-          "accept": "*/*",
-          "content-type": "application/json",
-          "authorization": process.env.CARDLADDER_AUTHORIZATION,
-          "x-firebase-appcheck": process.env.CARDLADDER_APP_CHECK
-        },
-        body: JSON.stringify({ data: { gemRateId, gradingCompany: grader.toLowerCase(), condition } }) // use correct condition
-      });
-  
-      if (estimateResponse.status === 401) {
-        console.error('\n🚨 Cardladder Authorization expired!');
-        return null;
-      }
-  
-      const estimateData = await estimateResponse.json();
-      return estimateData?.result || null;
-  
-    } catch (error) {
-      console.error('\n❌ Error fetching Cardladder result:', error);
+  try {
+    const { CARDLADDER_AUTHORIZATION, CARDLADDER_APP_CHECK } = loadEnv();
+
+    const searchResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpCertSearch", {
+      method: "POST",
+      headers: {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "authorization": CARDLADDER_AUTHORIZATION,
+        "x-firebase-appcheck": CARDLADDER_APP_CHECK
+      },
+      body: JSON.stringify({ data: { cert: certNumber, grader: grader.toLowerCase() } })
+    });
+
+    if (searchResponse.status === 401) {
+      console.error('\n🚨 Cardladder Authorization expired! Please refresh your tokens.');
+      process.exit(1);
+    }
+
+    const searchData = await searchResponse.json();
+    const gemRateId = searchData?.result?.gemRateId;
+    const condition = searchData?.result?.condition || "g10";
+
+    if (!gemRateId) {
+      console.log('\n⚠️ No gemRateId found.');
       return null;
     }
+
+    const estimateResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpEstimateValue", {
+      method: "POST",
+      headers: {
+        "accept": "*/*",
+        "content-type": "application/json",
+        "authorization": CARDLADDER_AUTHORIZATION,
+        "x-firebase-appcheck": CARDLADDER_APP_CHECK
+      },
+      body: JSON.stringify({ data: { gemRateId, gradingCompany: grader.toLowerCase(), condition } })
+    });
+
+    if (estimateResponse.status === 401) {
+      console.error('\n🚨 Cardladder Authorization expired! Please refresh your tokens.');
+      process.exit(1);
+    }
+
+    const estimateData = await estimateResponse.json();
+    return estimateData?.result || null;
+
+  } catch (error) {
+    console.error('\n❌ Error fetching Cardladder result:', error);
+    return null;
   }
-  
+}
 
 // --- Fetch PSA Images ---
 async function fetchPSACertImages(certNumber) {
   try {
+    const { PSA_API_TOKEN } = loadEnv();
+
     const url = `https://api.psacard.com/publicapi/cert/GetImagesByCertNumber/${certNumber}`;
 
     const headers = {
-      "Authorization": `Bearer ${process.env.PSA_API_TOKEN}`,
+      "Authorization": `Bearer ${PSA_API_TOKEN}`,
       "Content-Type": "application/json"
     };
 
     const response = await fetch(url, { method: "GET", headers });
 
     if (response.status === 401) {
-      console.error('\n🚨 PSA API Token expired!');
-      return null;
+      console.error('\n🚨 PSA API Token expired! Please refresh your tokens.');
+      process.exit(1);
     }
 
     const data = await response.json();
@@ -263,6 +280,8 @@ async function fetchPSACertImages(certNumber) {
 // --- Token health check ---
 async function checkTokenHealth() {
   try {
+    const { CARDLADDER_AUTHORIZATION, CARDLADDER_APP_CHECK, PSA_API_TOKEN } = loadEnv();
+
     const dummyCert = "12345678";
 
     const testResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpCertSearch", {
@@ -270,29 +289,32 @@ async function checkTokenHealth() {
       headers: {
         "accept": "*/*",
         "content-type": "application/json",
-        "authorization": process.env.CARDLADDER_AUTHORIZATION,
-        "x-firebase-appcheck": process.env.CARDLADDER_APP_CHECK
+        "authorization": CARDLADDER_AUTHORIZATION,
+        "x-firebase-appcheck": CARDLADDER_APP_CHECK
       },
       body: JSON.stringify({ data: { cert: dummyCert, grader: "psa" } })
     });
 
     if (testResponse.status === 401) {
       console.error('\n🚨 Cardladder Authorization expired.');
+      process.exit(1);
     }
 
     const psaResponse = await fetch(`https://api.psacard.com/publicapi/cert/GetByCertNumber/${dummyCert}`, {
       method: "GET",
       headers: {
-        "Authorization": `Bearer ${process.env.PSA_API_TOKEN}`,
+        "Authorization": `Bearer ${PSA_API_TOKEN}`,
         "Content-Type": "application/json"
       }
     });
 
     if (psaResponse.status === 401) {
       console.error('\n🚨 PSA Token expired.');
+      process.exit(1);
     }
 
   } catch (error) {
     console.error('\n❌ Error checking tokens:', error);
+    process.exit(1);
   }
 }
