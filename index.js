@@ -11,6 +11,9 @@ let csvWriter;
 let csvFilename;
 let scanCounter = 0;
 
+// --- Custom error for token expiration ---
+class TokenExpiredError extends Error {}
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout
@@ -26,13 +29,33 @@ function loadEnv() {
   };
 }
 
-// --- Create /scans folder automatically ---
+// --- Prompt for refreshing tokens ---
+async function refreshCardladderTokens() {
+  console.log('\n🔄 CardLadder tokens expired. Please paste new tokens:');
+  
+  const ask = (question) => new Promise((resolve) => rl.question(question, resolve));
+
+  const newAuthorization = await ask('Paste new CARDLADDER_AUTHORIZATION token: ');
+  const newAppCheck = await ask('Paste new CARDLADDER_APP_CHECK token: ');
+
+  const envContent = `
+CARDLADDER_AUTHORIZATION=${newAuthorization.trim()}
+CARDLADDER_APP_CHECK=${newAppCheck.trim()}
+PSA_API_TOKEN=${process.env.PSA_API_TOKEN}
+  `.trim();
+
+  fs.writeFileSync('.env', envContent);
+  console.log('✅ .env updated successfully! Reloading tokens...\n');
+  dotenv.config();
+}
+
+// --- Create /scans folder ---
 const scansDir = path.join(process.cwd(), 'scans');
 if (!fs.existsSync(scansDir)) {
   fs.mkdirSync(scansDir);
 }
 
-// Ask for filename at start
+// --- Startup prompt ---
 rl.question('📄 What would you like to name the CSV file? (leave blank for auto-name) ', (filename) => {
   if (!filename.trim()) {
     const today = new Date().toISOString().split('T')[0];
@@ -83,7 +106,7 @@ rl.on('line', async (input) => {
   rl.prompt();
 });
 
-// --- Parse certs properly ---
+// --- Parse certs ---
 function parseCerts(input) {
   const cleaned = input.replace(/\s+/g, '');
   const hasGrader = /(PSA|SGC|BGS)/i.test(cleaned);
@@ -110,7 +133,7 @@ function parseCerts(input) {
   return certs;
 }
 
-// --- Process certs ---
+// --- Main processing certs ---
 async function processCerts(certs) {
   let processed = 0;
   const total = certs.length;
@@ -124,49 +147,53 @@ async function processCerts(certs) {
     process.stdout.write(`\r${progressBar} ${percent}% (${processed}/${total}) Scanning ${grader} Cert: ${certNumber} `);
 
     try {
-      const cardladderResult = await fetchCardladderResult(certNumber, grader);
-      const certImages = await fetchPSACertImages(certNumber);
-
-      if (!cardladderResult || !certImages) {
-        console.log('\n⚠️ Skipping due to missing data.');
-        continue;
-      }
-
-      const payout = cardladderResult.estimatedValue ? (cardladderResult.estimatedValue * 0.90).toFixed(2) : '';
-
-      const row = {
-        certNumber,
-        estimatedValue: cardladderResult.estimatedValue,
-        payout,
-        lastSaleDate: cardladderResult.lastSaleDate,
-        confidence: cardladderResult.confidence,
-        grader,
-        index: cardladderResult.index,
-        indexId: cardladderResult.indexId,
-        description: cardladderResult.description,
-        grade: cardladderResult.grade,
-        population: cardladderResult.population,
-        indexPercentChange: cardladderResult.indexPercentChange,
-        frontImageUrl: certImages.frontImageUrl,
-        backImageUrl: certImages.backImageUrl
-      };
-
-      await csvWriter.writeRecords([row]);
-      process.stdout.write('\x07'); // 🎵
-
-      scanCounter++;
-      if (scanCounter % 10 === 0) {
-        console.log('\n🔄 Checking token validity...');
-        await checkTokenHealth();
-      }
-
+      await handleCertScan(certNumber, grader);
     } catch (error) {
-      console.error(`\n❌ Error processing cert #${certNumber}:`, error);
+      if (error instanceof TokenExpiredError) {
+        await refreshCardladderTokens();
+        console.log(`🔄 Rescanning Cert: ${certNumber}`);
+        await handleCertScan(certNumber, grader);
+      } else {
+        console.error('❌ Unexpected error during scanning:', error);
+      }
     }
   }
 
   const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`\n🎯 Finished scanning ${total} cert(s) in ${elapsedTime} seconds!\n`);
+}
+
+// --- Handle scanning a single cert ---
+async function handleCertScan(certNumber, grader) {
+  const cardladderResult = await fetchCardladderResult(certNumber, grader);
+  const certImages = await fetchPSACertImages(certNumber);
+
+  if (!cardladderResult || !certImages) {
+    console.log('\n⚠️ Skipping due to missing data.');
+    return;
+  }
+
+  const payout = cardladderResult.estimatedValue ? (cardladderResult.estimatedValue * 0.90).toFixed(2) : '';
+
+  const row = {
+    certNumber,
+    estimatedValue: cardladderResult.estimatedValue,
+    payout,
+    lastSaleDate: cardladderResult.lastSaleDate,
+    confidence: cardladderResult.confidence,
+    grader,
+    index: cardladderResult.index,
+    indexId: cardladderResult.indexId,
+    description: cardladderResult.description,
+    grade: cardladderResult.grade,
+    population: cardladderResult.population,
+    indexPercentChange: cardladderResult.indexPercentChange,
+    frontImageUrl: certImages.frontImageUrl,
+    backImageUrl: certImages.backImageUrl
+  };
+
+  await csvWriter.writeRecords([row]);
+  process.stdout.write('\x07'); // 🎵
 }
 
 // --- Build progress bar ---
@@ -179,142 +206,80 @@ function buildProgressBar(current, total) {
 
 // --- Fetch Cardladder ---
 async function fetchCardladderResult(certNumber, grader) {
-  try {
-    const { CARDLADDER_AUTHORIZATION, CARDLADDER_APP_CHECK } = loadEnv();
+  const { CARDLADDER_AUTHORIZATION, CARDLADDER_APP_CHECK } = loadEnv();
 
-    const searchResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpCertSearch", {
-      method: "POST",
-      headers: {
-        "accept": "*/*",
-        "content-type": "application/json",
-        "authorization": CARDLADDER_AUTHORIZATION,
-        "x-firebase-appcheck": CARDLADDER_APP_CHECK
-      },
-      body: JSON.stringify({ data: { cert: certNumber, grader: grader.toLowerCase() } })
-    });
+  const searchResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpCertSearch", {
+    method: "POST",
+    headers: {
+      "accept": "*/*",
+      "content-type": "application/json",
+      "authorization": CARDLADDER_AUTHORIZATION,
+      "x-firebase-appcheck": CARDLADDER_APP_CHECK
+    },
+    body: JSON.stringify({ data: { cert: certNumber, grader: grader.toLowerCase() } })
+  });
 
-    if (searchResponse.status === 401) {
-      console.error('\n🚨 Cardladder Authorization expired! Please refresh your tokens.');
-      process.exit(1);
-    }
+  if (searchResponse.status === 401) {
+    throw new TokenExpiredError();
+  }
 
-    const searchData = await searchResponse.json();
-    const gemRateId = searchData?.result?.gemRateId;
-    const condition = searchData?.result?.condition || "g10";
+  const searchData = await searchResponse.json();
+  const gemRateId = searchData?.result?.gemRateId;
+  const condition = searchData?.result?.condition || "g10";
 
-    if (!gemRateId) {
-      console.log('\n⚠️ No gemRateId found.');
-      return null;
-    }
-
-    const estimateResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpEstimateValue", {
-      method: "POST",
-      headers: {
-        "accept": "*/*",
-        "content-type": "application/json",
-        "authorization": CARDLADDER_AUTHORIZATION,
-        "x-firebase-appcheck": CARDLADDER_APP_CHECK
-      },
-      body: JSON.stringify({ data: { gemRateId, gradingCompany: grader.toLowerCase(), condition } })
-    });
-
-    if (estimateResponse.status === 401) {
-      console.error('\n🚨 Cardladder Authorization expired! Please refresh your tokens.');
-      process.exit(1);
-    }
-
-    const estimateData = await estimateResponse.json();
-    return estimateData?.result || null;
-
-  } catch (error) {
-    console.error('\n❌ Error fetching Cardladder result:', error);
+  if (!gemRateId) {
+    console.log('\n⚠️ No gemRateId found.');
     return null;
   }
+
+  const { CARDLADDER_AUTHORIZATION: auth2, CARDLADDER_APP_CHECK: app2 } = loadEnv();
+  const estimateResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpEstimateValue", {
+    method: "POST",
+    headers: {
+      "accept": "*/*",
+      "content-type": "application/json",
+      "authorization": auth2,
+      "x-firebase-appcheck": app2
+    },
+    body: JSON.stringify({ data: { gemRateId, gradingCompany: grader.toLowerCase(), condition } })
+  });
+
+  if (estimateResponse.status === 401) {
+    throw new TokenExpiredError();
+  }
+
+  const estimateData = await estimateResponse.json();
+  return estimateData?.result || null;
 }
 
 // --- Fetch PSA Images ---
 async function fetchPSACertImages(certNumber) {
-  try {
-    const { PSA_API_TOKEN } = loadEnv();
+  const { PSA_API_TOKEN } = loadEnv();
 
-    const url = `https://api.psacard.com/publicapi/cert/GetImagesByCertNumber/${certNumber}`;
+  const url = `https://api.psacard.com/publicapi/cert/GetImagesByCertNumber/${certNumber}`;
 
-    const headers = {
-      "Authorization": `Bearer ${PSA_API_TOKEN}`,
-      "Content-Type": "application/json"
-    };
+  const headers = {
+    "Authorization": `Bearer ${PSA_API_TOKEN}`,
+    "Content-Type": "application/json"
+  };
 
-    const response = await fetch(url, { method: "GET", headers });
+  const response = await fetch(url, { method: "GET", headers });
 
-    if (response.status === 401) {
-      console.error('\n🚨 PSA API Token expired! Please refresh your tokens.');
-      process.exit(1);
-    }
+  const data = await response.json();
 
-    const data = await response.json();
-
-    if (!Array.isArray(data)) {
-      console.warn('\n⚠️ PSA response unexpected format.');
-      return {
-        frontImageUrl: "./No-Image-Placeholder.svg.png",
-        backImageUrl: "./No-Image-Placeholder.svg.png"
-      };
-    }
-
-    let frontImage = data.find(img => img.IsFrontImage === true);
-    let backImage = data.find(img => img.IsFrontImage === false);
-
-    return {
-      frontImageUrl: frontImage?.ImageURL || "./No-Image-Placeholder.svg.png",
-      backImageUrl: backImage?.ImageURL || "./No-Image-Placeholder.svg.png"
-    };
-  } catch (error) {
-    console.error('\n❌ Error fetching PSA cert images:', error);
+  if (!Array.isArray(data)) {
+    console.warn('\n⚠️ PSA response unexpected format.');
     return {
       frontImageUrl: "./No-Image-Placeholder.svg.png",
       backImageUrl: "./No-Image-Placeholder.svg.png"
     };
   }
-}
 
-// --- Token health check ---
-async function checkTokenHealth() {
-  try {
-    const { CARDLADDER_AUTHORIZATION, CARDLADDER_APP_CHECK, PSA_API_TOKEN } = loadEnv();
+  let frontImage = data.find(img => img.IsFrontImage === true);
+  let backImage = data.find(img => img.IsFrontImage === false);
 
-    const dummyCert = "12345678";
-
-    const testResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpCertSearch", {
-      method: "POST",
-      headers: {
-        "accept": "*/*",
-        "content-type": "application/json",
-        "authorization": CARDLADDER_AUTHORIZATION,
-        "x-firebase-appcheck": CARDLADDER_APP_CHECK
-      },
-      body: JSON.stringify({ data: { cert: dummyCert, grader: "psa" } })
-    });
-
-    if (testResponse.status === 401) {
-      console.error('\n🚨 Cardladder Authorization expired.');
-      process.exit(1);
-    }
-
-    const psaResponse = await fetch(`https://api.psacard.com/publicapi/cert/GetByCertNumber/${dummyCert}`, {
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${PSA_API_TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    });
-
-    if (psaResponse.status === 401) {
-      console.error('\n🚨 PSA Token expired.');
-      process.exit(1);
-    }
-
-  } catch (error) {
-    console.error('\n❌ Error checking tokens:', error);
-    process.exit(1);
-  }
+  return {
+    frontImageUrl: frontImage?.ImageURL || "./No-Image-Placeholder.svg.png",
+    backImageUrl: backImage?.ImageURL || "./No-Image-Placeholder.svg.png"
+  };
 }
