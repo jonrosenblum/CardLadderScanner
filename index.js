@@ -68,16 +68,16 @@ rl.question('📄 What would you like to name the CSV file? (leave blank for aut
   csvWriter = createObjectCsvWriter({
     path: csvFilename,
     header: [
-      { id: 'certNumber', title: 'Cert Number' },
-      { id: 'estimatedValue', title: 'Estimated Value' },
+      { id: 'grader', title: 'Grading Company' },
+      { id: 'certNumber', title: 'Cert' },
+      { id: 'gemRateId', title: 'Gem Rate ID' },
+      { id: 'description', title: 'Info' },
+      { id: 'grade', title: 'Grade' },
+      { id: 'estimatedValue', title: 'CL' },
+      { id: 'confidence', title: 'Conf' },
       { id: 'payout', title: 'Payout' },
-      { id: 'lastSaleDate', title: 'Last Sale Date' },
-      { id: 'confidence', title: 'Confidence' },
-      { id: 'grader', title: 'Grader' },
       { id: 'index', title: 'Index' },
       { id: 'indexId', title: 'Index ID' },
-      { id: 'description', title: 'Description' },
-      { id: 'grade', title: 'Grade' },
       { id: 'population', title: 'Population' },
       { id: 'indexPercentChange', title: 'Index % Change' },
       { id: 'frontImageUrl', title: 'Front Image URL' },
@@ -151,7 +151,9 @@ async function processCerts(certs) {
     } catch (error) {
       if (error instanceof TokenExpiredError) {
         await refreshCardladderTokens();
-        console.log(`🔄 Rescanning Cert: ${certNumber}`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        dotenv.config();
+        console.log(`✅ Tokens refreshed. Rescanning cert: ${certNumber}\n`);
         await handleCertScan(certNumber, grader);
       } else {
         console.error('❌ Unexpected error during scanning:', error);
@@ -165,7 +167,7 @@ async function processCerts(certs) {
 
 // --- Handle scanning a single cert ---
 async function handleCertScan(certNumber, grader) {
-  const cardladderResult = await fetchCardladderResult(certNumber, grader);
+  const { gemRateId, cardladderResult } = await fetchCardladderResult(certNumber, grader);
   const certImages = await fetchPSACertImages(certNumber);
 
   if (!cardladderResult || !certImages) {
@@ -176,16 +178,16 @@ async function handleCertScan(certNumber, grader) {
   const payout = cardladderResult.estimatedValue ? (cardladderResult.estimatedValue * 0.90).toFixed(2) : '';
 
   const row = {
-    certNumber,
-    estimatedValue: cardladderResult.estimatedValue,
-    payout,
-    lastSaleDate: cardladderResult.lastSaleDate,
-    confidence: cardladderResult.confidence,
     grader,
-    index: cardladderResult.index,
-    indexId: cardladderResult.indexId,
+    certNumber,
+    gemRateId,
     description: cardladderResult.description,
     grade: cardladderResult.grade,
+    estimatedValue: cardladderResult.estimatedValue,
+    confidence: cardladderResult.confidence,
+    payout,
+    index: cardladderResult.index,
+    indexId: cardladderResult.indexId,
     population: cardladderResult.population,
     indexPercentChange: cardladderResult.indexPercentChange,
     frontImageUrl: certImages.frontImageUrl,
@@ -193,7 +195,7 @@ async function handleCertScan(certNumber, grader) {
   };
 
   await csvWriter.writeRecords([row]);
-  process.stdout.write('\x07'); // 🎵
+  process.stdout.write('\x07');
 }
 
 // --- Build progress bar ---
@@ -249,7 +251,7 @@ async function fetchCardladderResult(certNumber, grader) {
   }
 
   const estimateData = await estimateResponse.json();
-  return estimateData?.result || null;
+  return { gemRateId, cardladderResult: estimateData?.result || null };
 }
 
 // --- Fetch PSA Images ---
