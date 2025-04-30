@@ -4,12 +4,16 @@ import readline from 'readline';
 import path from 'path';
 import dotenv from 'dotenv';
 import { createObjectCsvWriter } from 'csv-writer';
+import { connect } from "puppeteer-real-browser";
+
 
 dotenv.config();
 
 let csvWriter;
 let csvFilename;
 let scanCounter = 0;
+
+let { firebaseAppCheck, cardladderAuthToken } = await loginAndExtractTokens();
 
 // --- Custom error for token expiration ---
 class TokenExpiredError extends Error {}
@@ -23,36 +27,140 @@ const rl = readline.createInterface({
 function loadEnv() {
   dotenv.config();
   return {
-    CARDLADDER_AUTHORIZATION: process.env.CARDLADDER_AUTHORIZATION,
-    CARDLADDER_APP_CHECK: process.env.CARDLADDER_APP_CHECK,
     PSA_API_TOKEN: process.env.PSA_API_TOKEN
   };
 }
 
-// --- Prompt for refreshing tokens ---
-async function refreshCardladderTokens() {
-  console.log('\n🔄 CardLadder tokens expired. Please paste new tokens:');
-  
-  const ask = (question) => new Promise((resolve) => rl.question(question, resolve));
+async function extractTokens(page) {
+  return new Promise((resolve) => {
+    const tokens = {};
 
-  const newAuthorization = await ask('Paste new CARDLADDER_AUTHORIZATION token: ');
-  const newAppCheck = await ask('Paste new CARDLADDER_APP_CHECK token: ');
+    page.on('requestfinished', async request => {
+      try {
+        const url = request.url();
+        const method = request.method();
 
-  const envContent = `
-CARDLADDER_AUTHORIZATION=${newAuthorization.trim()}
-CARDLADDER_APP_CHECK=${newAppCheck.trim()}
-PSA_API_TOKEN=${process.env.PSA_API_TOKEN}
-  `.trim();
+        // Skip preflight OPTIONS requests
+        if (method === 'OPTIONS') {
+          return;
+        }
 
-  fs.writeFileSync('.env', envContent);
-  console.log('✅ .env updated successfully! Reloading tokens...\n');
-  dotenv.config();
+        const headers = request.headers();
+
+        // Look for Firebase AppCheck token
+        if (url.includes('identitytoolkit.googleapis.com/v1/accounts:signInWithPassword')) {
+          const firebaseAppCheck = headers['x-firebase-appcheck'];
+          if (firebaseAppCheck && !tokens.firebaseAppCheck) {
+            tokens.firebaseAppCheck = firebaseAppCheck;
+            console.log('✅ Found Firebase AppCheck token.');
+          }
+        }
+
+        // Look for CardLadder Authorization token
+        if (url.includes('search-zzvl7ri3bq-uc.a.run.app/search')) {
+          const cardladderAuthToken = headers['authorization'];
+          if (cardladderAuthToken && !tokens.cardladderAuthToken) {
+            tokens.cardladderAuthToken = cardladderAuthToken;
+            console.log('✅ Found CardLadder Auth token.');
+          }
+        }
+
+        // If both tokens found, resolve
+        if (tokens.firebaseAppCheck && tokens.cardladderAuthToken) {
+          resolve(tokens);
+        }
+
+      } catch (err) {
+        console.warn('⚠️ Failed to extract token from request:', err.message);
+      }
+    });
+  });
 }
 
-// --- Create /scans folder ---
-const scansDir = path.join(process.cwd(), 'scans');
-if (!fs.existsSync(scansDir)) {
-  fs.mkdirSync(scansDir);
+async function loginAndExtractTokens() {
+  const { browser, page } = await connect({
+    headless: true,
+    args: [],
+    customConfig: {},
+    turnstile: true,
+    connectOption: {},
+    disableXvfb: false,
+    ignoreAllFlags: false
+  });
+
+  await page.setViewport({
+    width: 1366,
+    height: 768,
+    deviceScaleFactor: 1,
+    isMobile: false,
+    hasTouch: false,
+  });
+
+  await page.setUserAgent(
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+  );
+
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+    window.chrome = { runtime: {} };
+  });
+
+  async function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function performLogin() {
+    await page.screenshot({ path: 'login.png' });
+    console.log('Waiting for email field...');
+    await page.waitForSelector('#email', { timeout: 10000 });
+
+    await delay(1000);
+    await page.type('#email', 'jon.m.rosenblum@gmail.com');
+
+    await delay(1000);
+    await page.type('#password', 'Jnrsnblm12!');
+
+    await delay(1000);
+    await page.click('button.btn.primary.block');
+    console.log('Clicked login button.');
+
+    await delay(10000);
+
+    const currentUrl = page.url();
+    if (currentUrl.includes('login')) {
+      console.log('Login failed, reloading...');
+      await page.reload({ waitUntil: 'networkidle2' });
+      await performLogin();
+    } else {
+      console.log('Login successful! Current URL:', currentUrl);
+    }
+  }
+
+  try {
+    console.log('Navigating to login page...');
+    await page.goto('https://app.cardladder.com/login', { waitUntil: 'networkidle2' });
+
+    const tokensPromise = extractTokens(page);
+    await performLogin();
+    const tokens = await tokensPromise;
+
+    console.log('✅ Final extracted tokens');
+
+    return tokens;
+  } catch (error) {
+    console.error('❌ Error:', error);
+    return null;
+  } finally {
+    await browser.close();
+  }
+}
+
+async function refreshCardladderTokens() {
+  let { AppCheck, AuthToken } = await loginAndExtractTokens();
+  firebaseAppCheck = AppCheck;
+  cardladderAuthToken = AuthToken;
 }
 
 // --- Startup prompt ---
@@ -208,15 +316,14 @@ function buildProgressBar(current, total) {
 
 // --- Fetch Cardladder ---
 async function fetchCardladderResult(certNumber, grader) {
-  const { CARDLADDER_AUTHORIZATION, CARDLADDER_APP_CHECK } = loadEnv();
 
   const searchResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpCertSearch", {
     method: "POST",
     headers: {
       "accept": "*/*",
       "content-type": "application/json",
-      "authorization": CARDLADDER_AUTHORIZATION,
-      "x-firebase-appcheck": CARDLADDER_APP_CHECK
+      "authorization": cardladderAuthToken,
+      "x-firebase-appcheck": firebaseAppCheck
     },
     body: JSON.stringify({ data: { cert: certNumber, grader: grader.toLowerCase() } })
   });
@@ -226,6 +333,7 @@ async function fetchCardladderResult(certNumber, grader) {
   }
 
   const searchData = await searchResponse.json();
+
   const gemRateId = searchData?.result?.gemRateId;
   const condition = searchData?.result?.condition || "g10";
 
@@ -234,19 +342,19 @@ async function fetchCardladderResult(certNumber, grader) {
     return null;
   }
 
-  const { CARDLADDER_AUTHORIZATION: auth2, CARDLADDER_APP_CHECK: app2 } = loadEnv();
   const estimateResponse = await fetch("https://us-central1-cardladder-71d53.cloudfunctions.net/httpEstimateValue", {
     method: "POST",
     headers: {
       "accept": "*/*",
       "content-type": "application/json",
-      "authorization": auth2,
-      "x-firebase-appcheck": app2
+      "authorization": cardladderAuthToken,
+      "x-firebase-appcheck": firebaseAppCheck
     },
     body: JSON.stringify({ data: { gemRateId, gradingCompany: grader.toLowerCase(), condition } })
   });
 
   if (estimateResponse.status === 401) {
+    console.log(await estimateResponse.json());
     throw new TokenExpiredError();
   }
 
