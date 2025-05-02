@@ -215,25 +215,18 @@ rl.on('line', async (input) => {
 
 // --- Parse certs ---
 function parseCerts(input) {
-  const cleaned = input.replace(/\s+/g, '');
-  const hasGrader = /(PSA|SGC|BGS)/i.test(cleaned);
-
   const certs = [];
+  const cleaned = input.trim().replace(/\s+/g, '');
 
-  if (hasGrader) {
-    const parts = cleaned.split(/(PSA|SGC|BGS)/i).filter(Boolean);
+  // Match raw cert numbers or full URLs like https://www.psacard.com/cert/12345678
+  const regex = /(PSA|BGS|SGC)?\s*https?:\/\/www\.psacard\.com\/cert\/(\d{6,})|\b(PSA|BGS|SGC)?(\d{6,})\b/gi;
+  let match;
 
-    for (let i = 0; i < parts.length - 1; i += 2) {
-      const grader = parts[i].toUpperCase();
-      const certMatch = parts[i + 1].match(/\d{6,}/);
-      if (grader && certMatch) {
-        certs.push({ grader, certNumber: certMatch[0] });
-      }
-    }
-  } else {
-    const certMatch = cleaned.match(/\d{6,}/);
-    if (certMatch) {
-      certs.push({ grader: "PSA", certNumber: certMatch[0] });
+  while ((match = regex.exec(input)) !== null) {
+    const grader = (match[1] || match[3] || 'PSA').toUpperCase();
+    const certNumber = match[2] || match[4];
+    if (grader && certNumber) {
+      certs.push({ grader, certNumber });
     }
   }
 
