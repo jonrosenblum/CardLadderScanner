@@ -248,28 +248,39 @@ async function processCerts(certs) {
 
   for (const { grader, certNumber } of certs) {
     processed++;
-
-    const progressBar = buildProgressBar(processed, total);
-    const percent = Math.floor((processed / total) * 100);
-    process.stdout.write(`\r${progressBar} ${percent}% (${processed}/${total}) Scanning ${grader} Cert: ${certNumber} `);
+    const bar = buildProgressBar(processed, total);
+    const pct = Math.floor((processed / total) * 100);
+    process.stdout.write(`\r${bar} ${pct}% (${processed}/${total}) Scanning ${grader} Cert: ${certNumber} `);
 
     try {
       await handleCertScan(certNumber, grader);
     } catch (error) {
-      if (error instanceof TokenExpiredError) {
-        await refreshCardladderTokens();
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        dotenv.config();
-        console.log(`✅ Tokens refreshed. Rescanning cert: ${certNumber}\n`);
-        await handleCertScan(certNumber, grader);
-      } else {
-        console.error('❌ Unexpected error during scanning:', error);
-      }
+      console.error(`\n❌ Error for cert ${certNumber}:`, error.message);
+      await writeErrorRow(grader, certNumber, error.message);
     }
   }
 
   const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`\n🎯 Finished scanning ${total} cert(s) in ${elapsedTime} seconds!\n`);
+}
+
+async function writeErrorRow(grader, certNumber, message) {
+  await csvWriter.writeRecords([{
+    grader,
+    certNumber,
+    gemRateId: 'error',
+    description: message,
+    grade: 'error',
+    estimatedValue: 'error',
+    confidence: 'error',
+    payout: 'error',
+    index: 'error',
+    indexId: 'error',
+    population: 'error',
+    indexPercentChange: 'error',
+    frontImageUrl: 'error',
+    backImageUrl: 'error'
+  }]);
 }
 
 // --- Handle scanning a single cert ---
