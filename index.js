@@ -112,7 +112,6 @@ async function loginAndExtractTokens() {
   }
 
   async function performLogin() {
-    await page.screenshot({ path: 'login.png' });
     console.log('Waiting for email field...');
     await page.waitForSelector('#email', { timeout: 10000 });
 
@@ -158,9 +157,9 @@ async function loginAndExtractTokens() {
 }
 
 async function refreshCardladderTokens() {
-  let { AppCheck, AuthToken } = await loginAndExtractTokens();
-  firebaseAppCheck = AppCheck;
-  cardladderAuthToken = AuthToken;
+  let tokens = await loginAndExtractTokens();
+  firebaseAppCheck = tokens.firebaseAppCheck;
+  cardladderAuthToken = tokens.cardladderAuthToken;
 }
 
 // --- Startup prompt ---
