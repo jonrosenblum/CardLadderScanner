@@ -6,30 +6,24 @@ import dotenv from 'dotenv';
 import { createObjectCsvWriter } from 'csv-writer';
 import { connect } from "puppeteer-real-browser";
 
-
 dotenv.config();
 
 let csvWriter;
+let summaryCsvWriter;
 let csvFilename;
 let scanCounter = 0;
 
 let { firebaseAppCheck, cardladderAuthToken } = await loginAndExtractTokens();
 
-// --- Custom error for token expiration ---
 class TokenExpiredError extends Error {}
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout
-});
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-// --- Hot reload environment variables ---
 function loadEnv() {
   dotenv.config();
-  return {
-    PSA_API_TOKEN: process.env.PSA_API_TOKEN
-  };
+  return { PSA_API_TOKEN: process.env.PSA_API_TOKEN };
 }
+
 
 async function extractTokens(page) {
   return new Promise((resolve) => {
@@ -193,6 +187,21 @@ rl.question('📄 What would you like to name the CSV file? (leave blank for aut
     append: fs.existsSync(csvFilename)
   });
 
+  const summaryFilename = csvFilename.replace(/\.csv$/, '_summary.csv');
+  summaryCsvWriter = createObjectCsvWriter({
+    path: summaryFilename,
+    header: [
+      { id: 'grader', title: 'Grading Company' },
+      { id: 'certNumber', title: 'Cert' },
+      { id: 'description', title: 'Info' },
+      { id: 'grade', title: 'Grade' },
+      { id: 'scanDate', title: 'Date of Scan' },
+      { id: 'estimatedValue', title: 'CL' },
+      { id: 'confidence', title: 'Conf' }
+    ],
+    append: fs.existsSync(summaryFilename)
+  });
+
   console.log(`\n🔎 Ready to start scanning into ${csvFilename}!`);
   rl.setPrompt('📦 Paste certs or scan a cert: ');
   rl.prompt();
@@ -301,6 +310,7 @@ async function handleCertScan(certNumber, grader) {
   }
 
   const payout = cardladderResult.estimatedValue ? (cardladderResult.estimatedValue * 0.90).toFixed(2) : '';
+  const scanDate = new Date().toISOString().split('T')[0];
 
   const row = {
     grader,
@@ -319,10 +329,20 @@ async function handleCertScan(certNumber, grader) {
     backImageUrl: certImages.backImageUrl
   };
 
+  const summaryRow = {
+    grader,
+    certNumber,
+    description: cardladderResult.description,
+    grade: cardladderResult.grade,
+    scanDate,
+    estimatedValue: cardladderResult.estimatedValue,
+    confidence: cardladderResult.confidence
+  };
+
   await csvWriter.writeRecords([row]);
+  await summaryCsvWriter.writeRecords([summaryRow]);
   process.stdout.write('\x07');
 }
-
 // --- Build progress bar ---
 function buildProgressBar(current, total) {
   const barLength = 30;
