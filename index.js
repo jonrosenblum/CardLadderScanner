@@ -24,7 +24,6 @@ function loadEnv() {
   return { PSA_API_TOKEN: process.env.PSA_API_TOKEN };
 }
 
-
 async function extractTokens(page) {
   return new Promise((resolve) => {
     const tokens = {};
@@ -206,7 +205,6 @@ rl.question('📄 What would you like to name the CSV file? (leave blank for aut
   rl.setPrompt('📦 Paste certs or scan a cert: ');
   rl.prompt();
 });
-
 // --- Handle input ---
 rl.on('line', async (input) => {
   const certs = parseCerts(input);
@@ -310,7 +308,12 @@ async function handleCertScan(certNumber, grader) {
   }
 
   const payout = cardladderResult.estimatedValue ? (cardladderResult.estimatedValue * 0.90).toFixed(2) : '';
-  const scanDate = new Date().toISOString().split('T')[0];
+
+  const now = new Date();
+  const day = String(now.getDate()).padStart(2, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const year = now.getFullYear();
+  const scanDate = `${day}/${month}/${year}`; // DD/MM/YYYY format
 
   const row = {
     grader,
